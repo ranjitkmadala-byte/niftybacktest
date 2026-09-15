@@ -121,7 +121,10 @@ def main():
     if eng.empty:
         raise RuntimeError("All engine rows were lost during timestamp normalization")
 
-    print("SCORING...")
+    print("SCORING WITH NIFTY-CALIBRATED v2.9...")
+    print("3m OI threshold: +0.05%")
+    print("OI point #2: three consecutive >= +0.05% 3m OI observations")
+    print("Qty imbalance threshold: +/-25%")
     rows=[]
     for i,r in eng.iterrows():
         hist=eng.iloc[:i+1]
@@ -132,10 +135,20 @@ def main():
 
         sign=1 if r.session_px>0 else -1 if r.session_px<0 else 0
         boi=soi=0
-        if pd.notna(r.oi3) and r.oi3>=0.10:
-            boi+=1 if sign>0 else 0; soi+=1 if sign<0 else 0
-        if pd.notna(r.cumoi) and r.cumoi>=1:
-            boi+=1 if sign>0 else 0; soi+=1 if sign<0 else 0
+        # NIFTY calibration from 11-Sep distribution:
+        # 0.05% is approximately the upper-quartile 3-minute OI event.
+        # Point 1 = meaningful fresh 3m OI expansion aligned with session direction.
+        if pd.notna(r.oi3) and r.oi3>=0.05:
+            boi+=1 if sign>0 else 0
+            soi+=1 if sign<0 else 0
+
+        # Point 2 = persistence of fresh OI rather than rigid cumulative +1%.
+        # Require three consecutive positive 3-minute OI observations.
+        recent_oi=hist.oi3.dropna().tail(3)
+        persistent_fresh_oi=(len(recent_oi)>=3 and (recent_oi>=0.05).all())
+        if persistent_fresh_oi:
+            boi+=1 if sign>0 else 0
+            soi+=1 if sign<0 else 0
 
         states=[]
         for _,z in hist.iterrows():
@@ -169,7 +182,10 @@ def main():
                 td=pd.to_numeric(a.get("delta_pct"),errors="coerce")
                 imb=pd.to_numeric(a.get("total_qty_imbalance"),errors="coerce")
         bag=1 if pd.notna(td) and td>=30 else 0; sag=1 if pd.notna(td) and td<=-30 else 0
-        bimb=.5 if pd.notna(imb) and imb>=20 else 0; simb=.5 if pd.notna(imb) and imb<=-20 else 0
+        # NIFTY imbalance calibration: +/-25% is materially stronger than the
+        # old +/-20% threshold on the Sep-11 distribution.
+        bimb=.5 if pd.notna(imb) and imb>=25 else 0
+        simb=.5 if pd.notna(imb) and imb<=-25 else 0
 
         bull=bp+boi+bst+bfl+bpcr+bag+bimb
         bear=sp+soi+sst+sfl+spcr+sag+simb
@@ -205,6 +221,13 @@ def main():
     print(
         f"PEAK score={peak_row[16]} direction={peak_row[17]} "
         f"time={peak_local:%H:%M} IST state={peak_row[18]}"
+    )
+    print(
+        "PEAK COMPONENTS | "
+        f"price={peak_row[3]}/2 | oi={peak_row[4]}/2 | "
+        f"state={peak_row[7]}/2 | flow={peak_row[9]}/1.5 | "
+        f"pcr={peak_row[11]}/1 | aggression={peak_row[12]}/1 | "
+        f"imbalance={peak_row[13]}/0.5"
     )
 
     for threshold in (4,6,7,8,8.5):

@@ -162,9 +162,32 @@ def main():
         c.commit()
 
     print(f"COMPLETE rows={len(rows)}")
-    print(f"PEAK score={peak['score']} direction={peak['direction']} time={peak['ts'].astimezone(IST):%H:%M} IST state={peak['state']}")
+    if not rows:
+        print("NO SCORED ROWS: Sep-11 source rows were found, but none survived timestamp/scoring preparation.")
+        return
+
+    # Use the in-memory scored rows as the authoritative backtest result.
+    # This avoids a misleading crash if a post-insert SELECT returns no row.
+    peak_row = sorted(rows, key=lambda r: (-float(r[16]), r[2]))[0]
+    peak_ts = peak_row[2]
+    if getattr(peak_ts, "tzinfo", None) is None:
+        peak_ts = peak_ts.tz_localize("UTC") if hasattr(peak_ts, "tz_localize") else peak_ts.replace(tzinfo=ZoneInfo("UTC"))
+    peak_local = peak_ts.tz_convert(IST) if hasattr(peak_ts, "tz_convert") else peak_ts.astimezone(IST)
+
+    print(
+        f"PEAK score={peak_row[16]} direction={peak_row[17]} "
+        f"time={peak_local:%H:%M} IST state={peak_row[18]}"
+    )
+
     for threshold in (4,6,7,8,8.5):
         hit=next((r for r in rows if float(r[16])>=threshold),None)
-        print(f"FIRST >= {threshold}: {hit[2].astimezone(IST):%H:%M} IST | {hit[16]} | {hit[17]}" if hit else f"FIRST >= {threshold}: NONE")
+        if hit:
+            hts=hit[2]
+            if getattr(hts, "tzinfo", None) is None:
+                hts=hts.tz_localize("UTC") if hasattr(hts, "tz_localize") else hts.replace(tzinfo=ZoneInfo("UTC"))
+            hlocal=hts.tz_convert(IST) if hasattr(hts, "tz_convert") else hts.astimezone(IST)
+            print(f"FIRST >= {threshold}: {hlocal:%H:%M} IST | {hit[16]} | {hit[17]} | {hit[18]}")
+        else:
+            print(f"FIRST >= {threshold}: NONE")
 
 if __name__=="__main__": main()

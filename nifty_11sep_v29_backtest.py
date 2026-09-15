@@ -43,37 +43,61 @@ def main():
         with c.cursor() as x:x.execute(DDL)
         c.commit()
 
+    # Read with psycopg directly. PostgreSQL also returns a clean IST timestamp
+    # text field so pandas never has to infer mixed timestamp formats.
     with db() as c:
-        eng=pd.read_sql("""
-          SELECT * FROM public.index_engine_snapshots
-          WHERE trading_date=%s AND symbol=%s ORDER BY ts
-        """,c,params=(DAY,SYMBOL))
-        agg=pd.read_sql("""
-          SELECT * FROM public.index_futures_aggression_snapshots
-          WHERE trading_date=%s AND symbol=%s ORDER BY ts
-        """,c,params=(DAY,SYMBOL))
+        with c.cursor() as x:
+            x.execute("""
+              SELECT *,
+                     to_char(ts AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS') AS ts_ist_text
+              FROM public.index_engine_snapshots
+              WHERE trading_date=%s AND symbol=%s
+              ORDER BY ts
+            """,(DAY,SYMBOL))
+            eng_rows=x.fetchall()
 
-    if eng.empty: raise RuntimeError("No Sep-11 NIFTY rows in index_engine_snapshots")
+            x.execute("""
+              SELECT *,
+                     to_char(ts AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS') AS ts_ist_text
+              FROM public.index_futures_aggression_snapshots
+              WHERE trading_date=%s AND symbol=%s
+              ORDER BY ts
+            """,(DAY,SYMBOL))
+            agg_rows=x.fetchall()
 
-    # Neon timestamps may arrive as mixed Python datetime / ISO strings with
-    # different offsets. Parse element-by-element to avoid pandas mixed-format errors.
-    def parse_utc(v):
-        if pd.isna(v):
-            return pd.NaT
-        try:
-            t = pd.Timestamp(v)
-            if t.tzinfo is None:
-                return t.tz_localize("UTC")
-            return t.tz_convert("UTC")
-        except Exception:
-            return pd.NaT
+    eng=pd.DataFrame([dict(r) for r in eng_rows])
+    agg=pd.DataFrame([dict(r) for r in agg_rows])
 
-    eng["ts"] = eng["ts"].apply(parse_utc)
-    eng = eng[eng["ts"].notna()].sort_values("ts").reset_index(drop=True)
+    print("SOURCE CHECK")
+    print(f"index_engine_snapshots: {len(eng)}")
+    print(f"index_futures_aggression_snapshots: {len(agg)}")
+
+    if eng.empty:
+        raise RuntimeError("No Sep-11 NIFTY rows in index_engine_snapshots")
+
+    print(f"engine first={eng.iloc[0]['ts_ist_text']} IST | last={eng.iloc[-1]['ts_ist_text']} IST")
+    if not agg.empty:
+        print(f"aggression first={agg.iloc[0]['ts_ist_text']} IST | last={agg.iloc[-1]['ts_ist_text']} IST")
+
+    # Build timezone-aware timestamps from PostgreSQL's normalized IST text.
+    eng["ts"]=pd.to_datetime(
+        eng["ts_ist_text"],
+        format="%Y-%m-%d %H:%M:%S",
+        errors="coerce"
+    ).dt.tz_localize(IST)
+
+    eng=eng[eng["ts"].notna()].sort_values("ts").reset_index(drop=True)
 
     if not agg.empty:
-        agg["ts"] = agg["ts"].apply(parse_utc)
-        agg = agg[agg["ts"].notna()].sort_values("ts").reset_index(drop=True)
+        agg["ts"]=pd.to_datetime(
+            agg["ts_ist_text"],
+            format="%Y-%m-%d %H:%M:%S",
+            errors="coerce"
+        ).dt.tz_localize(IST)
+        agg=agg[agg["ts"].notna()].sort_values("ts").reset_index(drop=True)
+
+    print(f"timestamp-normalized engine rows: {len(eng)}")
+    print(f"timestamp-normalized aggression rows: {len(agg)}")
 
     # derive missing 3m fields from stored snapshots
     eng["future"]=pd.to_numeric(eng.future,errors="coerce")
@@ -94,6 +118,10 @@ def main():
         pf=pd.to_numeric(eng.put_fresh_value_cr,errors="coerce").fillna(0)
         eng["flow"]=cf+pf
 
+    if eng.empty:
+        raise RuntimeError("All engine rows were lost during timestamp normalization")
+
+    print("SCORING...")
     rows=[]
     for i,r in eng.iterrows():
         hist=eng.iloc[:i+1]

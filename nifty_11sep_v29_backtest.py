@@ -230,8 +230,51 @@ def main():
         f"flow={'N/A' if not MONEY_FLOW_AVAILABLE else str(peak_row[9])+'/1.5'} | "
         f"pcr={peak_row[11]}/1 | aggression={peak_row[12]}/1 | imbalance={peak_row[13]}/0.5"
     )
+    print(
+        f"PEAK ARITHMETIC CHECK | bull={peak_row[14]} | bear={peak_row[15]} | "
+        f"max={max(float(peak_row[14]),float(peak_row[15]))} | stored_score={peak_row[16]}"
+    )
     available_max = 10.0 if MONEY_FLOW_AVAILABLE else 8.5
     print(f"PEAK OBSERVED SCORE = {peak_row[16]} / {available_max} available points")
+
+    print("DIAGNOSTIC WINDOW 11:00-11:40 IST")
+    print("time | px3 | oi3 | session | fut_state | streak | pricePts | oiPts | statePts | flowPts | pcrPts | aggPts | imbPts | bull | bear | score | direction")
+    for rr in rows:
+        t=rr[2]
+        local=t.tz_convert(IST) if hasattr(t,"tz_convert") else t.astimezone(IST)
+        if (local.hour==11 and 0 <= local.minute <= 40):
+            # Find matching source row for raw px/oi/session values.
+            src=eng[eng["ts"]==t]
+            if not src.empty:
+                z=src.iloc[-1]
+                pxv=z.get("px3"); oiv=z.get("oi3"); sess=z.get("session_px")
+            else:
+                pxv=oiv=sess=None
+            print(
+                f"{local:%H:%M} | px3={pxv} | oi3={oiv} | session={sess} | "
+                f"state={rr[5]} | streak={rr[6]} | "
+                f"price={rr[3]}/2 | oi={rr[4]}/2 | statePts={rr[7]}/2 | "
+                f"flow={rr[9]}/1.5 | pcr={rr[11]}/1 | agg={rr[12]}/1 | imb={rr[13]}/0.5 | "
+                f"bull={rr[14]} | bear={rr[15]} | score={rr[16]} | {rr[17]}"
+            )
+
+    print("FOCUS ROWS 11:18 / 11:21 / 11:24 / 11:27 / 11:30")
+    for target in ("11:18","11:21","11:24","11:27","11:30"):
+        hits=[]
+        for rr in rows:
+            t=rr[2]
+            local=t.tz_convert(IST) if hasattr(t,"tz_convert") else t.astimezone(IST)
+            if local.strftime("%H:%M")==target:
+                hits.append(rr)
+        if not hits:
+            print(f"{target}: NO ROW")
+            continue
+        rr=hits[0]
+        print(
+            f"{target}: price={rr[3]}/2 oi={rr[4]}/2 state={rr[7]}/2 "
+            f"flow={rr[9]}/1.5 pcr={rr[11]}/1 agg={rr[12]}/1 imb={rr[13]}/0.5 "
+            f"=> bull={rr[14]} bear={rr[15]} score={rr[16]} direction={rr[17]} stateLabel={rr[18]}"
+        )
 
     for threshold in (4,6,7,8,8.5):
         hit=next((r for r in rows if float(r[16])>=threshold),None)

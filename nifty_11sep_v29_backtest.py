@@ -49,7 +49,10 @@ def main():
         with c.cursor() as x:
             x.execute("""
               SELECT *,
-                     to_char(ts AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS') AS ts_ist_text
+                     to_char(ts AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS') AS ts_ist_text,
+                     100.0*(future/NULLIF(LAG(future) OVER (ORDER BY ts),0)-1) AS sql_price_3m_pct,
+                     100.0*(future_oi/NULLIF(LAG(future_oi) OVER (ORDER BY ts),0)-1) AS sql_oi_3m_pct,
+                     pcr-LAG(pcr) OVER (ORDER BY ts) AS sql_pcr_change_3m
               FROM public.index_engine_snapshots
               WHERE trading_date=%s AND symbol=%s
               ORDER BY ts
@@ -103,28 +106,30 @@ def main():
     eng["future"]=pd.to_numeric(eng.future,errors="coerce")
     eng["future_oi"]=pd.to_numeric(eng.future_oi,errors="coerce")
     eng["spot"]=pd.to_numeric(eng.spot,errors="coerce")
-    eng["px3"]=eng.future.pct_change()*100
-    eng["oi3"]=eng.future_oi.pct_change()*100
+    eng["px3"]=pd.to_numeric(eng["sql_price_3m_pct"],errors="coerce")
+    eng["oi3"]=pd.to_numeric(eng["sql_oi_3m_pct"],errors="coerce")
     eng["session_px"]=pd.to_numeric(eng.get("spot_change_pct_t0"),errors="coerce")
     eng["cumoi"]=pd.to_numeric(eng.future_oi_change_pct_t0,errors="coerce")
     eng["pcr"]=pd.to_numeric(eng.pcr,errors="coerce")
-    eng["pcrd"]=eng.pcr.diff()
+    eng["pcrd"]=pd.to_numeric(eng["sql_pcr_change_3m"],errors="coerce")
 
-    # Money-flow proxy from stored fresh option values + futures activity if newer fields absent.
-    if "total_flow_3m_cr" in eng.columns:
-        eng["flow"]=pd.to_numeric(eng.total_flow_3m_cr,errors="coerce")
+    # Sep-11 old index collector did not store the new traded-value 3m money flow.
+    # Do not mislabel fresh-OI value as money flow; mark this component unavailable.
+    if "total_flow_3m_cr" in eng.columns and pd.to_numeric(eng["total_flow_3m_cr"],errors="coerce").notna().any():
+        eng["flow"]=pd.to_numeric(eng["total_flow_3m_cr"],errors="coerce")
+        MONEY_FLOW_AVAILABLE=True
     else:
-        cf=pd.to_numeric(eng.call_fresh_value_cr,errors="coerce").fillna(0)
-        pf=pd.to_numeric(eng.put_fresh_value_cr,errors="coerce").fillna(0)
-        eng["flow"]=cf+pf
+        eng["flow"]=float("nan")
+        MONEY_FLOW_AVAILABLE=False
 
     if eng.empty:
         raise RuntimeError("All engine rows were lost during timestamp normalization")
 
-    print("SCORING WITH NIFTY-CALIBRATED v2.9...")
-    print("3m OI threshold: +0.05%")
-    print("OI point #2: three consecutive >= +0.05% 3m OI observations")
+    print("SCORING EXACT-SQL NIFTY RECONSTRUCTION...")
+    print("OI threshold: +0.05%; second OI point = 3 consecutive >= +0.05%")
     print("Qty imbalance threshold: +/-25%")
+    print(f"Historical 3m money flow available: {MONEY_FLOW_AVAILABLE}")
+    print("NOTE: when unavailable, score is observed score / 8.5 available points, not a true zero for money flow.")
     rows=[]
     for i,r in eng.iterrows():
         hist=eng.iloc[:i+1]
@@ -135,15 +140,14 @@ def main():
 
         sign=1 if r.session_px>0 else -1 if r.session_px<0 else 0
         boi=soi=0
-        # NIFTY calibration from 11-Sep distribution:
-        # 0.05% is approximately the upper-quartile 3-minute OI event.
-        # Point 1 = meaningful fresh 3m OI expansion aligned with session direction.
+        # NIFTY calibration: +0.05% is approximately an upper-quartile
+        # positive 3-minute OI event on 11-Sep.
         if pd.notna(r.oi3) and r.oi3>=0.05:
             boi+=1 if sign>0 else 0
             soi+=1 if sign<0 else 0
 
-        # Point 2 = persistence of fresh OI rather than rigid cumulative +1%.
-        # Require three consecutive positive 3-minute OI observations.
+        # Second OI point rewards persistent fresh positioning instead of
+        # requiring cumulative OI to exceed +1%.
         recent_oi=hist.oi3.dropna().tail(3)
         persistent_fresh_oi=(len(recent_oi)>=3 and (recent_oi>=0.05).all())
         if persistent_fresh_oi:
@@ -182,8 +186,6 @@ def main():
                 td=pd.to_numeric(a.get("delta_pct"),errors="coerce")
                 imb=pd.to_numeric(a.get("total_qty_imbalance"),errors="coerce")
         bag=1 if pd.notna(td) and td>=30 else 0; sag=1 if pd.notna(td) and td<=-30 else 0
-        # NIFTY imbalance calibration: +/-25% is materially stronger than the
-        # old +/-20% threshold on the Sep-11 distribution.
         bimb=.5 if pd.notna(imb) and imb>=25 else 0
         simb=.5 if pd.notna(imb) and imb<=-25 else 0
 
@@ -224,11 +226,12 @@ def main():
     )
     print(
         "PEAK COMPONENTS | "
-        f"price={peak_row[3]}/2 | oi={peak_row[4]}/2 | "
-        f"state={peak_row[7]}/2 | flow={peak_row[9]}/1.5 | "
-        f"pcr={peak_row[11]}/1 | aggression={peak_row[12]}/1 | "
-        f"imbalance={peak_row[13]}/0.5"
+        f"price={peak_row[3]}/2 | oi={peak_row[4]}/2 | state={peak_row[7]}/2 | "
+        f"flow={'N/A' if not MONEY_FLOW_AVAILABLE else str(peak_row[9])+'/1.5'} | "
+        f"pcr={peak_row[11]}/1 | aggression={peak_row[12]}/1 | imbalance={peak_row[13]}/0.5"
     )
+    available_max = 10.0 if MONEY_FLOW_AVAILABLE else 8.5
+    print(f"PEAK OBSERVED SCORE = {peak_row[16]} / {available_max} available points")
 
     for threshold in (4,6,7,8,8.5):
         hit=next((r for r in rows if float(r[16])>=threshold),None)

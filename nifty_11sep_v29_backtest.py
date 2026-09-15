@@ -62,6 +62,10 @@ def f(v):
     try:return float(v) if v is not None else None
     except:return None
 
+def fmt(v, digits=4):
+    v=f(v)
+    return "N/A" if v is None else f"{v:.{digits}f}"
+
 def main():
     if not DB: raise RuntimeError("NEON_DATABASE_URL required")
     with db() as c:
@@ -164,8 +168,8 @@ def main():
         if not hit:
             print(target,"NO ROW"); continue
         print(
-          f"{target} | px3={f(hit['price_3m_pct']):.4f}% oi3={f(hit['oi_3m_pct']):.4f}% "
-          f"session={f(hit['session_price_pct']):.4f}% | {hit['futures_state']} x{hit['state_streak']} | "
+          f"{target} | px3={fmt(hit['price_3m_pct'])}% oi3={fmt(hit['oi_3m_pct'])}% "
+          f"session={fmt(hit['session_price_pct'])}% | {hit['futures_state']} x{hit['state_streak']} | "
           f"price L/S={hit['bull_price']}/{hit['bear_price']} "
           f"oi L/S={hit['bull_oi']}/{hit['bear_oi']} "
           f"state L/S={hit['bull_state']}/{hit['bear_state']} "

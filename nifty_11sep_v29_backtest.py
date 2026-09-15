@@ -55,8 +55,25 @@ def main():
 
     if eng.empty: raise RuntimeError("No Sep-11 NIFTY rows in index_engine_snapshots")
 
-    eng["ts"]=pd.to_datetime(eng.ts,utc=True)
-    if not agg.empty: agg["ts"]=pd.to_datetime(agg.ts,utc=True)
+    # Neon timestamps may arrive as mixed Python datetime / ISO strings with
+    # different offsets. Parse element-by-element to avoid pandas mixed-format errors.
+    def parse_utc(v):
+        if pd.isna(v):
+            return pd.NaT
+        try:
+            t = pd.Timestamp(v)
+            if t.tzinfo is None:
+                return t.tz_localize("UTC")
+            return t.tz_convert("UTC")
+        except Exception:
+            return pd.NaT
+
+    eng["ts"] = eng["ts"].apply(parse_utc)
+    eng = eng[eng["ts"].notna()].sort_values("ts").reset_index(drop=True)
+
+    if not agg.empty:
+        agg["ts"] = agg["ts"].apply(parse_utc)
+        agg = agg[agg["ts"].notna()].sort_values("ts").reset_index(drop=True)
 
     # derive missing 3m fields from stored snapshots
     eng["future"]=pd.to_numeric(eng.future,errors="coerce")
